@@ -30,6 +30,30 @@ src = reg_set.src
 # maybe we just return a tree and do depth first for prints?
 
 # need to handle rol/ror (resolve_assignment(ls[12]))
+def find_dependent_registers(assignment):
+  if type(assignment) not in [LowLevelILSetRegSsa, LowLevelILSetRegSsaPartial]:
+    raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
+  # load up flattened tree
+  sources = [source]
+  todo = []
+  output = []
+  while sources:
+    source = sources.pop()
+    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILSx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot, LowLevelILLsl, LowLevelILLsr, LowLevelILRol, LowLevelILRor, LowLevelILAdd]:
+      for operand in source.operands:
+        sources.append(operand)
+    elif type(source) in [LowLevelILLoadSsa]:
+      # operands are [src, src_memory] and src_memory is just an int ref we don't want
+      sources.append(source.src)
+    elif type(value) == LowLevelILRegSsa:
+      output.append(resolve_dest(value.src))
+    elif type(value) == LowLevelILRegSsaPartial:
+      output.append(resolve_dest(value.full_reg))
+    elif type(value) == LowLevelILConst:
+      continue
+    else:
+      raise Exception("Couldn't process instruction %s type %s" % (source, type(source)))
+  return output
 
 def resolve_source(source):
   sizes = {1: "b", 2: "w", 4: "d"}
@@ -204,3 +228,4 @@ def resolve_assignment(assignment):
     return "%s = %s" % (output, full_src)
   else:
     raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
+
