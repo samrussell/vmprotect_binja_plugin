@@ -33,6 +33,7 @@ src = reg_set.src
 
 def resolve_source(source):
   sizes = {1: "b", 2: "w", 4: "d"}
+  mask_for_size = {1: "0xFF", 2: "0xFFFF", 4: "0xFFFFFFFF"}
   masks = {
     "al":0x000000FF,
     "bl":0x000000FF,
@@ -63,7 +64,7 @@ def resolve_source(source):
   output = []
   while sources:
     source = sources.pop()
-    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot, LowLevelILLsl, LowLevelILLsr]:
+    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILSx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot, LowLevelILLsl, LowLevelILLsr, LowLevelILRol, LowLevelILRor, LowLevelILAdd]:
       todo.append(source)
       for operand in source.operands:
         sources.append(operand)
@@ -87,6 +88,10 @@ def resolve_source(source):
       if value.src.name in shifts:
         result = "(%s %s)" % (result, shifts[value.src.name])
       output.append(result)
+    elif type(value) == LowLevelILAdd:
+      rhs = output.pop()
+      lhs = output.pop()
+      output.append("(%s + %s)" % (lhs, rhs))
     elif type(value) == LowLevelILSub:
       rhs = output.pop()
       lhs = output.pop()
@@ -111,15 +116,26 @@ def resolve_source(source):
       rhs = output.pop()
       lhs = output.pop()
       output.append("(%s >> %s)" % (lhs, rhs))
+    elif type(value) == LowLevelILRol:
+      rhs = output.pop()
+      lhs = output.pop()
+      output.append("(%s & ((%s << %s) | (%s >> (%d - %s))))" % (mask_for_size[value.size], lhs, rhs, lhs, value.size*8, rhs))
+    elif type(value) == LowLevelILRor:
+      rhs = output.pop()
+      lhs = output.pop()
+      output.append("(%s & ((%s >> %s) | (%s << (%d - %s))))" % (mask_for_size[value.size], lhs, rhs, lhs, value.size*8, rhs))
     elif type(value) == LowLevelILZx:
       operand = output.pop()
-      output.append("zx.%s(%s)" % (sizes[value.size], operand))
+      output.append("zx(%s, %s)" % (operand, value.size))
+    elif type(value) == LowLevelILSx:
+      operand = output.pop()
+      output.append("sx(%s, %s)" % (operand, value.size))
     elif type(value) == LowLevelILNot:
       operand = output.pop()
-      output.append("~(%s)" % operand)
+      output.append("not(%s, %s)" % (operand, value.size))
     elif type(value) == LowLevelILLoadSsa:
       operand = output.pop()
-      output.append("[%s].%s" % (operand, sizes[value.size]))
+      output.append("read_mem(%s,%s)" % (operand, value.size))
     else:
       raise Exception("Couldn't process %s" % value)
   if len(output) != 1:
