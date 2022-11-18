@@ -29,32 +29,6 @@ src = reg_set.src
 # and another for printing the assignment
 # maybe we just return a tree and do depth first for prints?
 
-# need to handle rol/ror (resolve_assignment(ls[12]))
-def find_dependent_registers(assignment):
-  if type(assignment) not in [LowLevelILSetRegSsa, LowLevelILSetRegSsaPartial]:
-    raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
-  # load up flattened tree
-  sources = [source]
-  todo = []
-  output = []
-  while sources:
-    source = sources.pop()
-    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILSx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot, LowLevelILLsl, LowLevelILLsr, LowLevelILRol, LowLevelILRor, LowLevelILAdd]:
-      for operand in source.operands:
-        sources.append(operand)
-    elif type(source) in [LowLevelILLoadSsa]:
-      # operands are [src, src_memory] and src_memory is just an int ref we don't want
-      sources.append(source.src)
-    elif type(value) == LowLevelILRegSsa:
-      output.append(resolve_dest(value.src))
-    elif type(value) == LowLevelILRegSsaPartial:
-      output.append(resolve_dest(value.full_reg))
-    elif type(value) == LowLevelILConst:
-      continue
-    else:
-      raise Exception("Couldn't process instruction %s type %s" % (source, type(source)))
-  return output
-
 def resolve_source(source):
   sizes = {1: "b", 2: "w", 4: "d"}
   mask_for_size = {1: "0xFF", 2: "0xFFFF", 4: "0xFFFFFFFF"}
@@ -229,3 +203,53 @@ def resolve_assignment(assignment):
   else:
     raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
 
+def find_dependent_registers(assignment):
+  if type(assignment) not in [LowLevelILSetRegSsa, LowLevelILSetRegSsaPartial]:
+    raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
+  # load up flattened tree
+  sources = [assignment.src]
+  todo = []
+  output = []
+  while sources:
+    source = sources.pop()
+    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILSx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot, LowLevelILLsl, LowLevelILLsr, LowLevelILRol, LowLevelILRor, LowLevelILAdd]:
+      for operand in source.operands:
+        sources.append(operand)
+    elif type(source) in [LowLevelILLoadSsa]:
+      # operands are [src, src_memory] and src_memory is just an int ref we don't want
+      sources.append(source.src)
+    elif type(source) == LowLevelILRegSsa:
+      output.append(source.src)
+    elif type(source) == LowLevelILRegSsaPartial:
+      output.append(source.full_reg)
+    elif type(source) == LowLevelILConst:
+      continue
+    else:
+      raise Exception("Couldn't process instruction %s type %s" % (source, type(source)))
+  return output
+
+def find_all_dependent_registers(address):
+  # get last version
+  func = bv.get_functions_containing(address)[0]
+  llil_ssa = func.llil.ssa_form
+  base_assignment = func.get_llil_at(address).ssa_form
+  assignments = [base_assignment]
+  output_assignments = []
+  while assignments:
+    assignment = assignments.pop()
+    log_info("Analysing assignment %s" % assignment)
+    output_assignments.append(assignment)
+    dependent_registers = find_dependent_registers(assignment)
+    for register in dependent_registers:
+      log_info("Adding dependent register %s" % register)
+      assignment = llil_ssa.get_ssa_reg_definition(register)
+      if assignment:
+        log_info("Defined at: %s" % assignment)
+        assignments.append(assignment)
+      else:
+        log_info("Register %s has no definition, skipping" % register)
+  # convert to pythonesque
+  output_python = []
+  while output_assignments:
+    output_python.append(resolve_assignment(output_assignments.pop()))
+  return output_python
