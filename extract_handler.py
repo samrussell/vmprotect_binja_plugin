@@ -29,8 +29,7 @@ src = reg_set.src
 # and another for printing the assignment
 # maybe we just return a tree and do depth first for prints?
 
-# this looks good, just need to handle the shifts from AH as ((eax >> 8) & 0xFF)
-# and into AH as (val << 8) & 0xFF00
+# need to handle rol/ror (resolve_assignment(ls[12]))
 
 def resolve_source(source):
   sizes = {1: "b", 2: "w", 4: "d"}
@@ -52,13 +51,19 @@ def resolve_source(source):
     "bp":0x0000FFFF,
     "sp":0x0000FFFF,
   }
+  shifts = {
+    "ah":">> 8",
+    "bh":">> 8",
+    "ch":">> 8",
+    "dh":">> 8",
+  }
   # load up flattened tree
   sources = [source]
   todo = []
   output = []
   while sources:
     source = sources.pop()
-    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot]:
+    if type(source) in [LowLevelILSub, LowLevelILZx, LowLevelILAnd, LowLevelILXor, LowLevelILOr, LowLevelILNot, LowLevelILLsl, LowLevelILLsr]:
       todo.append(source)
       for operand in source.operands:
         sources.append(operand)
@@ -74,27 +79,38 @@ def resolve_source(source):
   while todo:
     value = todo.pop()
     if type(value) == LowLevelILConst:
-      output.append(value.constant)
+      output.append(hex(value.constant))
     elif type(value) == LowLevelILRegSsa:
       output.append("%s_%s" % (value.src.reg.name, value.src.version))
     elif type(value) == LowLevelILRegSsaPartial:
-      output.append("(%s & %s_%s)" % (hex(masks[value.src.name]), value.full_reg.reg.name, value.full_reg.version))
+      result = "(%s & %s_%s)" % (hex(masks[value.src.name]), value.full_reg.reg.name, value.full_reg.version)
+      if value.src.name in shifts:
+        result = "(%s %s)" % (result, shifts[value.src.name])
+      output.append(result)
     elif type(value) == LowLevelILSub:
-      lhs = output.pop()
       rhs = output.pop()
+      lhs = output.pop()
       output.append("(%s - %s)" % (lhs, rhs))
     elif type(value) == LowLevelILAnd:
-      lhs = output.pop()
       rhs = output.pop()
+      lhs = output.pop()
       output.append("(%s & %s)" % (lhs, rhs))
     elif type(value) == LowLevelILXor:
-      lhs = output.pop()
       rhs = output.pop()
+      lhs = output.pop()
       output.append("(%s ^ %s)" % (lhs, rhs))
     elif type(value) == LowLevelILOr:
-      lhs = output.pop()
       rhs = output.pop()
+      lhs = output.pop()
       output.append("(%s | %s)" % (lhs, rhs))
+    elif type(value) == LowLevelILLsl:
+      rhs = output.pop()
+      lhs = output.pop()
+      output.append("(%s << %s)" % (lhs, rhs))
+    elif type(value) == LowLevelILLsr:
+      rhs = output.pop()
+      lhs = output.pop()
+      output.append("(%s >> %s)" % (lhs, rhs))
     elif type(value) == LowLevelILZx:
       operand = output.pop()
       output.append("zx.%s(%s)" % (sizes[value.size], operand))
@@ -153,10 +169,22 @@ def resolve_assignment(assignment):
     "bp":0xFFFF0000,
     "sp":0xFFFF0000,
   }
+  shifts = {
+    "ah":"<< 8",
+    "bh":"<< 8",
+    "ch":"<< 8",
+    "dh":"<< 8",
+  }
   if type(assignment) == LowLevelILSetRegSsa:
     return "%s = %s" % (resolve_dest(assignment.dest), resolve_source(assignment.src))
   elif type(assignment) == LowLevelILSetRegSsaPartial:
     previous_version = "%s_%s" % (assignment.full_reg.reg, assignment.full_reg.version - 1)
-    return "%s = (%s & %s) | (%s & %s)" % (resolve_dest(assignment.full_reg), hex(inverse_masks[assignment.dest.name]), previous_version, hex(masks[assignment.dest.name]), resolve_source(assignment.src))
+    output = resolve_dest(assignment.full_reg)
+    original = "(%s & %s)" % (hex(inverse_masks[assignment.dest.name]), previous_version)
+    change = "(%s & %s)" % (hex(masks[assignment.dest.name]), resolve_source(assignment.src))
+    full_src = "%s & %s" % (original, change)
+    if assignment.dest.name in shifts:
+      full_src = "(%s %s)" % (full_src, shifts[assignment.dest.name])
+    return "%s = %s" % (output, full_src)
   else:
     raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
