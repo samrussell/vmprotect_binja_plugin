@@ -1,34 +1,3 @@
-from functools import reduce
-
-func = bv.get_functions_containing(here)
-
-ls = func.llil.ssa_form
-
-# we get the latest version of our vars
-
-ssa_reg = reduce(lambda x, y: x if x.version > y.version else y, filter(lambda x: x.reg == "esi", ls.ssa_registers))
-ssa_ebx = reduce(lambda x, y: x if x.version > y.version else y, filter(lambda x: x.reg == "ebx", ls.ssa_registers))
-
-reg_set = ls.get_ssa_reg_definition(ssa_reg)
-
-src = reg_set.src
-
-# ebx is hard with bl stuff
-# check this out
-# ebx#1.bl = ebx#0.bl ^ eax#7.al
-# ebx#2 = ebx#1 ^ eax#16
-# so we need to move all of ebx#0 across to ebx#1 apart from bl
-# let's do the use case
-# we want the output to be ebx#1 = (ebx#0 & 0xFFFFFF00) | (0x000000FF & ((0x000000FF & ebx#0) ^ (0x000000FF & eax#7)))
-# that's a bit yuck
-# problem we have is that it's not always a register as an operand
-# e.g. <llil: eax#1 = zx.d([esi#1].b @ mem#0)>
-# we have assign(eax#1, lowlevelzx(readmem(esi#1)))
-# so this is annoying
-# so we do need another function for resolving operands that dead-ends at registers/consts
-# and another for printing the assignment
-# maybe we just return a tree and do depth first for prints?
-
 def resolve_source(source):
   sizes = {1: "b", 2: "w", 4: "d"}
   mask_for_size = {1: "0xFF", 2: "0xFFFF", 4: "0xFFFFFFFF"}
@@ -228,11 +197,7 @@ def find_dependent_registers(assignment):
       raise Exception("Couldn't process instruction %s type %s" % (source, type(source)))
   return output
 
-def find_all_dependent_registers(address):
-  # get last version
-  func = bv.get_functions_containing(address)[0]
-  llil_ssa = func.llil.ssa_form
-  base_assignment = func.get_llil_at(address).ssa_form
+def find_all_dependent_registers(func, llil_ssa, base_assignment):
   assignments = [base_assignment]
   output_assignments = []
   while assignments:
@@ -253,3 +218,22 @@ def find_all_dependent_registers(address):
   while output_assignments:
     output_python.append(resolve_assignment(output_assignments.pop()))
   return output_python
+
+def find_all_dependent_registers_from_address(address):
+  func = bv.get_functions_containing(address)[0]
+  base_assignment = func.get_llil_at(address).ssa_form
+  llil_ssa = func.llil.ssa_form
+  return find_all_dependent_registers(func, llil_ssa, base_assignment)
+
+def find_all_dependent_registers_from_register_name(func, register_name):
+  llil_ssa = func.llil.ssa_form
+  registers = sorted(filter(lambda x: x.reg.name==register_name, llil_ssa.ssa_registers), key=lambda x: x.version)
+  if not registers:
+    log_info("Register not mentioned %s" % register_name)
+    return []
+  register = registers[-1]
+  base_assignment = ls.get_ssa_reg_definition(register)
+  if not base_assignment:
+    log_info("Register not defined %s" % register_name)
+    return []
+  return find_all_dependent_registers(func, llil_ssa, base_assignment)
