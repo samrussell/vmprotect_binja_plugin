@@ -11,6 +11,13 @@ class AstNodeAssignment(AstNode):
   def __repr__(self):
     return "%s = %s" % (self.dest, self.src)
 
+class AstNodeAssignmentPartial(AstNode):
+  def __init__(self, dest, src):
+    self.dest = dest
+    self.src = src
+  def __repr__(self):
+    return "%s = %s" % (self.dest, self.src)
+
 class AstNodeMemoryStore(AstNode):
   def __init__(self, dest, src):
     self.dest = dest
@@ -28,6 +35,12 @@ class AstNodeRegisterSsa(AstNode):
     self.version = version
   def __repr__(self):
     return "%s#%s" % (self.name, self.version)
+  def __hash__(self):
+    return hash((self.name, self.version))
+  def __eq__(self, other):
+    return type(other) == type(self) \
+      and self.name == other.name \
+      and self.version == other.version
 
 class AstNodeReadMem(AstNode):
   def __init__(self, operand, size):
@@ -56,6 +69,13 @@ class AstNodeNeg(AstNode):
     self.size = size
   def __repr__(self):
     return "Neg(%s, %s)" % (self.operand, self.size)
+
+class AstNodeFlagBit(AstNode):
+  def __init__(self, operand, bit):
+    self.operand = operand
+    self.bit = bit
+  def __repr__(self):
+    return "FlagBit(%s, %s)" % (self.operand, self.bit)
 
 class AstNodeBswap(AstNode):
   def __init__(self, operand):
@@ -92,6 +112,9 @@ class AstNodeShl(AstNodeBinaryOperation):
 class AstNodeXor(AstNodeBinaryOperation):
   OPERATION = "Xor"
 
+class AstNodeOr(AstNodeBinaryOperation):
+  OPERATION = "Or"
+
 def try_lookup_register(name, version):
   if version == 0:
     return AstNodeRegisterSsa(name, version)
@@ -112,6 +135,9 @@ def resolve_source(source):
       todo.append(source)
       sources.append(source.src)
     elif type(source) in [LowLevelILConst, LowLevelILRegSsa, LowLevelILRegSsaPartial]:
+      todo.append(source)
+    elif type(source) == LowLevelILFlagBitSsa:
+      # workaround, just pushes the class and no operands
       todo.append(source)
     else:
       raise Exception("Couldn't process instruction %s type %s" % (source, type(source)))
@@ -139,6 +165,11 @@ def resolve_source(source):
     elif type(value) == LowLevelILNeg:
       operand = output.pop()
       output.append(AstNodeNeg(operand, value.size))
+    elif type(value) == LowLevelILFlagBitSsa:
+      # ignore for now
+      #bit = output.pop()
+      #operand = output.pop()
+      output.append(AstNodeFlagBit("dummy flag", 0xab))
     elif type(value) == LowLevelILAdd:
       rhs = output.pop()
       lhs = output.pop()
@@ -147,6 +178,10 @@ def resolve_source(source):
       rhs = output.pop()
       lhs = output.pop()
       output.append(AstNodeXor(lhs, rhs))
+    elif type(value) == LowLevelILOr:
+      rhs = output.pop()
+      lhs = output.pop()
+      output.append(AstNodeOr(lhs, rhs))
     elif type(value) == LowLevelILRor:
       rhs = output.pop()
       lhs = output.pop()
@@ -201,10 +236,13 @@ def find_important_registers():
   pass
 
 def find_dependent_registers(assignment):
-  if type(assignment) not in [LowLevelILSetRegSsa, LowLevelILSetRegSsaPartial]:
+  if type(assignment) in [LowLevelILSetRegSsa, LowLevelILSetRegSsaPartial]:
+    sources = [assignment.src]
+  elif type(assignment) == LowLevelILStoreSsa:
+    sources = [assignment.src, assignment.dest]
+  else:
     raise Exception("Couldn't resolve assignment %s type %s" % (assignment, type(assignment)))
   # load up flattened tree
-  sources = [assignment.src]
   todo = []
   output = []
   while sources:
@@ -217,15 +255,22 @@ def find_dependent_registers(assignment):
       sources.append(source.src)
     elif type(source) == LowLevelILRegSsa:
       output.append(source.src)
+    elif type(source) == LowLevelILFlagBitSsa:
+      # don't care for now
+      continue
+    elif type(source) == SSAFlag:
+      # we should track these but also don't really care for now
+      continue
+      #output.append(source.src)
     elif type(source) == LowLevelILRegSsaPartial:
       output.append(source.full_reg)
-    elif type(source) == LowLevelILConst:
+    elif type(source) == LowLevelILConst or type(source) == int:
       continue
     else:
       raise Exception("Couldn't process instruction %s type %s" % (source, type(source)))
   return output
 
-def find_all_dependent_registers(func, llil_ssa, base_assignment):
+def find_all_dependent_registers(llil_ssa, base_assignment):
   assignments = [base_assignment]
   output_assignments = []
   while assignments:
@@ -260,8 +305,120 @@ def find_all_dependent_registers_from_register_name(func, register_name):
     log_info("Register not mentioned %s" % register_name)
     return []
   register = registers[-1]
-  base_assignment = ls.get_ssa_reg_definition(register)
+  base_assignment = llil_ssa.get_ssa_reg_definition(register)
   if not base_assignment:
     log_info("Register not defined %s" % register_name)
     return []
-  return find_all_dependent_registers(func, llil_ssa, base_assignment)
+  return find_all_dependent_registers(llil_ssa, base_assignment)
+
+def find_all_memory_writes(func):
+  llil_ssa = func.llil.ssa_form
+  store_instructions = list(filter(lambda x: isinstance(x, LowLevelILStoreSsa), llil_ssa.instructions))
+  if not store_instructions:
+    log_info("No store instructions found")
+    return []
+  
+  assignments = []
+  for store_instruction in store_instructions:
+    assignments += find_all_dependent_registers(llil_ssa, store_instruction)
+  
+  return assignments
+
+def evaluate_rol(value, amount):
+  # we are assuming 32 bits which is going to be wrong later
+  bits = 32
+  mask = 0xFFFFFFFF
+  return mask & ((value << amount) | (value >> (bits - amount)))
+
+def evaluate_ror(value, amount):
+  # we are assuming 32 bits which is going to be wrong later
+  bits = 32
+  mask = 0xFFFFFFFF
+  return mask & ((value >> amount) | (value << (bits - amount)))
+
+def evaluate_add(lhs, rhs):
+  # we are assuming 32 bits which is going to be wrong later
+  mask = 0xFFFFFFFF
+  output = mask & (lhs + rhs)
+  return output
+
+def evaluate_sub(lhs, rhs):
+  # we are assuming 32 bits which is going to be wrong later
+  mask = 0xFFFFFFFF
+  output = lhs - rhs
+  while output < 0:
+    output += (mask+1)
+  return mask & output
+
+def evaluate_value(value, assignments_by_register):
+  masks_by_bits = {
+    8: 0xFF,
+    16: 0xFFFF,
+    32: 0xFFFFFFFF
+  }
+  if isinstance(value, AstNodeRegisterSsa):
+    assignment = assignments_by_register[value]
+    return evaluate_value(assignment.src, assignments_by_register)
+  elif isinstance(value, AstNodeConstant):
+    return value.value
+  elif isinstance(value, AstNodeAdd):
+    lhs = evaluate_value(value.lhs, assignments_by_register)
+    rhs = evaluate_value(value.rhs, assignments_by_register)
+    return evaluate_add(lhs, rhs)
+  elif isinstance(value, AstNodeSub):
+    lhs = evaluate_value(value.lhs, assignments_by_register)
+    rhs = evaluate_value(value.rhs, assignments_by_register)
+    return evaluate_sub(lhs, rhs)
+  elif isinstance(value, AstNodeRol):
+    lhs = evaluate_value(value.lhs, assignments_by_register)
+    rhs = evaluate_value(value.rhs, assignments_by_register)
+    return evaluate_rol(lhs, rhs)
+  elif isinstance(value, AstNodeRor):
+    lhs = evaluate_value(value.lhs, assignments_by_register)
+    rhs = evaluate_value(value.rhs, assignments_by_register)
+    return evaluate_ror(lhs, rhs)
+  elif isinstance(value, AstNodeNot):
+    mask = masks_by_bits[value.size * 8]
+    operand = evaluate_value(value.operand, assignments_by_register)
+    return operand ^ mask
+  elif isinstance(value, AstNodeNeg):
+    operand = evaluate_value(value.operand, assignments_by_register)
+    return 1 + masks_by_bits[value.size*8] - operand 
+  elif isinstance(value, AstNodeXor):
+    lhs = evaluate_value(value.lhs, assignments_by_register)
+    rhs = evaluate_value(value.rhs, assignments_by_register)
+    return lhs ^ rhs
+  elif isinstance(value, AstNodeReadMem):
+    # special case for esp
+    if isinstance(value.operand, AstNodeAdd) and isinstance(value.operand.lhs, AstNodeRegisterSsa):
+      add = value.operand
+      if add.lhs.name == "esp" and evaluate_value(add.rhs, {}) == 0x28:
+        return assignments_by_register["key"]
+      else:
+        raise Exception("Looks like ESP read but we didn't handle it? %s %s" % (value, type(add.rhs)))
+    address = evaluate_value(value.operand, assignments_by_register)
+    data = bv.read_int(address, value.size)
+    while data < 0:
+      data += (masks_by_bits[value.size * 8] + 1)
+    return data
+  else:
+    raise Exception("Couldn't evalute %s type %s" % (value, type(value)))
+
+def get_final_value(func, register_name, initial_registers):
+  edi_vars = find_all_dependent_registers_from_register_name(func, register_name)
+  edi_vars_by_name = {x.dest: x for x in edi_vars} | initial_registers
+  return evaluate_value(edi_vars[-1].dest, edi_vars_by_name)
+
+def evaluate_vmenter(func, key):
+  initial_registers = {
+    # this feels weird but recursion makes us do dumb things
+    "key" : key,
+    AstNodeRegisterSsa("esp", 0) : AstNodeAssignment(AstNodeRegisterSsa("esp", 0), AstNodeConstant(0xFFFF0000))
+  }
+  return {
+    "edi": get_final_value(func, "edi", initial_registers),
+    "esp": get_final_value(func, "esp", initial_registers),
+    "ebp": get_final_value(func, "ebp", initial_registers),
+    "ebx": get_final_value(func, "ebx", initial_registers),
+    "esi": get_final_value(func, "esi", initial_registers)
+  }
